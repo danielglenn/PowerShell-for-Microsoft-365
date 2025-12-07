@@ -17,11 +17,6 @@
 - Certificate of the Entra ID app installed in the user's CurrentUser\My store (https://pnp.github.io/powershell/articles/authentication.html#non-interactive-authentication-using-a-certificate-in-the-windows-certificate-store)
 - NOTE: edit the #sites array in the script to list all SharePoint sites you want to target. 
 
-## Installation
-```powershell
-Install-Module PnP.PowerShell -Force
-```
-
 ## Usage
 ```powershell
 .\ListAllSharePointSiteFiles.ps1 -ClientId "your-app-id" -TenantId "your-tenant-id" -Thumbprint "ABC123DEF456..." -exportFolder "C:\Exports"
