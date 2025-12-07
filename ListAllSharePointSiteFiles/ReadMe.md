@@ -30,7 +30,7 @@ Install-Module PnP.PowerShell -Force
 ## Parameters
 - `-ClientId` - Entra ID App (Client) ID (required)
 - `-TenantId` - Entra ID Tenant ID (GUID or name.onmicrosoft.com) (required)
-- `-Thumbprint` - Certificate thumbprint from CurrentUser\My store
+- `-Thumbprint` - Certificate thumbprint from CurrentUser\My store (required)
 - `-exportFolder` - FOLDER of the CSV to write to, such as "C:\Exports" (required)
 
 ## Output
