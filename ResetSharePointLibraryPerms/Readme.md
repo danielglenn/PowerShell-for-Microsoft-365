@@ -10,11 +10,6 @@
 - Entra ID app created with appropriate permissions to modify SharePoint sites (https://pnp.github.io/powershell/articles/registerapplication.html)
 - Certificate of the Entra ID app installed in the user's CurrentUser\My store (https://pnp.github.io/powershell/articles/authentication.html#non-interactive-authentication-using-a-certificate-in-the-windows-certificate-store)
 
-## Installation
-```powershell
-Install-Module -Name PnP.PowerShell -Force
-```
-
 ## Usage
 ```powershell
 .\ResetPerms.ps1 -SiteUrl "https://yourtenant.sharepoint.com/sites/YourSite" -ClientId "your-app-id" -TenantId "your-tenant-id" -Thumbprint "ABC123DEF456..." -LibraryName "Documents"
