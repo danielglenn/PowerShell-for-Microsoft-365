@@ -1,5 +1,5 @@
 
-# List AllS harePoint Site Files
+# List All SharePoint Site Files
 
 ## Description
 `ListAllSharePointSiteFiles.ps1` is a PowerShell script that connects to Microsoft 365 and retrieves a complete list of all files across provided SharePoint sites. It helps inventory and audit file storage.
