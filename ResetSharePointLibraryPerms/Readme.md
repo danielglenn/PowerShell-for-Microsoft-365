@@ -5,7 +5,7 @@
 A PowerShell script that resets permissions on SharePoint files in a document library to inherit from the library.
 
 ## Prerequisites
-- PowerShell 5.1 or higher
+- PowerShell 7.4 or higher
 - PnP PowerShell module
 - Entra ID app created with appropriate permissions to modify SharePoint sites
 - Certificate of the Entra ID app installed in the user's CurrentUser\My store
