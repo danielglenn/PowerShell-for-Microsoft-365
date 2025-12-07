@@ -12,9 +12,9 @@
 
 ## Prerequisites
 - PowerShell 7.4 or higher
-- PnP PowerShell module installed
-- Entra ID app created with appropriate permissions to access SharePoint sites
-- Certificate of the Entra ID app installed in the user's CurrentUser\My store
+- PnP PowerShell module installed (https://pnp.github.io/powershell/articles/installation.html)
+- Entra ID app created with appropriate permissions to access SharePoint sites (https://pnp.github.io/powershell/articles/registerapplication.html)
+- Certificate of the Entra ID app installed in the user's CurrentUser\My store (https://pnp.github.io/powershell/articles/authentication.html#non-interactive-authentication-using-a-certificate-in-the-windows-certificate-store)
 - NOTE: edit the #sites array in the script to list all SharePoint sites you want to target. 
 
 ## Installation
