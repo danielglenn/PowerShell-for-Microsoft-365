@@ -6,9 +6,9 @@ A PowerShell script that resets permissions on SharePoint files in a document li
 
 ## Prerequisites
 - PowerShell 7.4 or higher
-- PnP PowerShell module
-- Entra ID app created with appropriate permissions to modify SharePoint sites
-- Certificate of the Entra ID app installed in the user's CurrentUser\My store
+- PnP PowerShell module (https://pnp.github.io/powershell/articles/installation.html)
+- Entra ID app created with appropriate permissions to modify SharePoint sites (https://pnp.github.io/powershell/articles/registerapplication.html)
+- Certificate of the Entra ID app installed in the user's CurrentUser\My store (https://pnp.github.io/powershell/articles/authentication.html#non-interactive-authentication-using-a-certificate-in-the-windows-certificate-store)
 
 ## Installation
 ```powershell
