@@ -2,7 +2,7 @@
 # Reset Permissions (SharePoint files in a library)
 
 ## Overview
-A PowerShell script that resets permissions on SharePoint files in a document library to inherit from the library.
+`ResetPerms.ps1` is a PowerShell script that resets permissions on SharePoint files in a document library to inherit from the library.
 
 ## Prerequisites
 - PowerShell 7.4 or higher
