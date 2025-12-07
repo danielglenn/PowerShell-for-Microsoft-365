@@ -11,7 +11,7 @@
 - Outputs results to CSV export per site
 
 ## Prerequisites
-- PowerShell 5.1 or higher
+- PowerShell 7.4 or higher
 - PnP PowerShell module installed
 - Entra ID app created with appropriate permissions to access SharePoint sites
 - Certificate of the Entra ID app installed in the user's CurrentUser\My store
