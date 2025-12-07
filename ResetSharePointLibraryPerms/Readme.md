@@ -25,7 +25,7 @@ Install-Module -Name PnP.PowerShell -Force
 - `-TenantId` - Entra ID Tenant ID (GUID or name.onmicrosoft.com) (required)
 - `-Thumbprint` - Certificate thumbprint from CurrentUser\My store (required)
 - `-LibraryName` - The name of the document library to process, such as "Documents" (required)
-- **SiteUrl** (required): The SharePoint site URL
+- `-SiteUrl` - The SharePoint site URL (required)
 
 ## Features
 - Resets file permissions to inherit from the library 
