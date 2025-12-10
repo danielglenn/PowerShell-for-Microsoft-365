@@ -3,6 +3,9 @@ PowerShell scripts and insights for Microsoft 365 services like SharePoint, Team
 
 -----
 
+## Get SharePoint Site Users
+Retrieves and lists all users and security groups with access to a SharePoint site
+
 ## List All SharePoint Site Files
 Retrieves a complete list of all files across provided SharePoint sites. It helps inventory and audit file storage.
 
