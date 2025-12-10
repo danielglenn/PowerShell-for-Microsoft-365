@@ -12,20 +12,21 @@
 - **CSV export** with full permission details
 
 ## Prerequisites
-- [PnP.PowerShell](https://pnp.github.io/powershell/) module installed (https://pnp.github.io/powershell/articles/installation.html)
+- PnP.PowerShell module installed (https://pnp.github.io/powershell/articles/installation.html)
 - Entra ID app registration with SharePoint API permissions (https://pnp.github.io/powershell/articles/registerapplication.html)
 - Client certificate installed in `CurrentUser\My` store (https://pnp.github.io/powershell/articles/authentication.html#non-interactive-authentication-using-a-certificate-in-the-windows-certificate-store)
 
 
 ## Entra ID app permissions required
-- SharePoint (application permission)
--- Sites.Read.All — read site/web/role assignments and site collection admins (If you prefer to give full control instead of read-only) Sites.FullControl.All
+**SharePoint** (application permission)
+- Sites.Read.All — read site/web/role assignments and site collection admins (If you prefer to give full control instead of read-only) Sites.FullControl.All
 
--Microsoft Graph (application permissions)
--- Group.Read.All — read AAD/M365 groups and list group members
--- User.Read.All — read user profile properties (displayName, mail, etc.)
--- (Alternative: Directory.Read.All covers both groups and users but is broader — only use it if you need directory-wide read access.)
+**Microsoft Graph** (application permissions)
+- Group.Read.All — read AAD/M365 groups and list group members
+- User.Read.All — read user profile properties (displayName, mail, etc.)
+- (Alternative: Directory.Read.All covers both groups and users but is broader — only use it if you need directory-wide read access.)
 
+**Make sure to grant Admin Consent for the permissions.**
 
 ## Usage
 ```powershell
