@@ -12,6 +12,7 @@
 
 ## Entra ID app permissions required
 - SharePoint > Application Permissions > Sites.ReadWrite.All
+- Make sure to grant Admin Consent for the permission.
 
 ## Usage
 ```powershell
