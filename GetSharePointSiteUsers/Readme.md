@@ -12,6 +12,7 @@
 - **CSV export** with full permission details
 
 ## Prerequisites
+- PowerShell 7.4 or higher
 - PnP.PowerShell module installed (https://pnp.github.io/powershell/articles/installation.html)
 - Entra ID app registration with SharePoint API permissions (https://pnp.github.io/powershell/articles/registerapplication.html)
 - Client certificate installed in `CurrentUser\My` store (https://pnp.github.io/powershell/articles/authentication.html#non-interactive-authentication-using-a-certificate-in-the-windows-certificate-store)
