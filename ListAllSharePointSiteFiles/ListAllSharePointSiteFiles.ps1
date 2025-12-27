@@ -1,4 +1,4 @@
-# Created by Daniel Glenn 10/28/2025, revised December 6th, 2025
+# Created by Daniel Glenn 10/28/2025, revised December 27th, 2025
 # Repository: https://github.com/danielglenn/PowerShell-for-Microsoft-365
 
 # Prerequisites:
