@@ -1,4 +1,3 @@
-
 # List All SharePoint Site Files
 
 ## Description
@@ -23,13 +22,14 @@
 
 ## Usage
 ```powershell
-.\ListAllSharePointSiteFiles.ps1 -ClientId "your-app-id" -TenantId "your-tenant-id" -Thumbprint "ABC123DEF456..." -exportFolder "C:\Exports"
+.\ListAllSharePointSiteFiles.ps1 -ClientId "your-app-id" -TenantId "your-tenant-id" -Thumbprint "ABC123DEF456..." -SitesCsvPath "C:\Exports\sites.csv" -exportFolder "C:\Exports"
 ```
 
 ## Parameters
 - `-ClientId` - Entra ID App (Client) ID (required)
 - `-TenantId` - Entra ID Tenant ID (GUID or name.onmicrosoft.com) (required)
 - `-Thumbprint` - Certificate thumbprint from CurrentUser\My store (required)
+- `-SitesCsvPath` - Path to CSV file containing list of sites, such as "C:\Exports\sites.csv" (required)
 - `-exportFolder` - FOLDER of the CSV to write to, such as "C:\Exports" (required)
 
 ## Output
@@ -42,3 +42,10 @@ Returns file details including:
 
 ## Support
 For issues or questions, refer to Microsoft 365 documentation or PnP PowerShell documentation.
+
+## Notes
+- The `SiteUrl` column is required
+- URLs should be absolute HTTPS URLs
+- Trailing slashes are optional
+- Blank rows and invalid URLs are skipped with warnings
+- Duplicate URLs are automatically removed
