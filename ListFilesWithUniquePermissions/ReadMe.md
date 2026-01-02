@@ -25,7 +25,7 @@
 ## Usage
 Using a CSV of sites:
 ```powershell
-.\nListFilesWithUniquePermissions.ps1 -ClientId "your-app-id" -TenantId "your-tenant-id" -Thumbprint "ABC123DEF456..." -SitesCsvPath "C:\Exports\sites.csv" -exportFolder "C:\Exports"
+.\ListFilesWithUniquePermissions.ps1 -ClientId "your-app-id" -TenantId "your-tenant-id" -Thumbprint "ABC123DEF456..." -SitesCsvPath "C:\Exports\sites.csv" -exportFolder "C:\Exports"
 ```
 
 Using direct site URLs:
