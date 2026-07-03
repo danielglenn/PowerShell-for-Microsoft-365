@@ -154,6 +154,15 @@ function Get-CsvValue {
     if ($prop -and $null -ne $prop.Value) { return [string]$prop.Value }
     return ''
 }
+function Get-CsvValueAny {
+    # Returns the first non-empty value from a list of possible column names.
+    param($Row, [string[]]$Names)
+    foreach ($name in $Names) {
+        $value = (Get-CsvValue -Row $Row -Name $name).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value }
+    }
+    return ''
+}
 #endregion
 #region ── Module check ───────────────────────────────────────────────────────
 Write-Header "SharePoint Online Site Usage Insights Exporter"
@@ -268,7 +277,10 @@ $siteCounts      = @{}
 $tokenHasReportsReadAll = $false
 $usageRowsTotal = 0
 $usageRowsWithSiteUrl = 0
+$usageRowsWithSiteIdentifier = 0
 $usageRowsMatchedScope = 0
+$ignoreSiteUrlFilterDueToConcealment = $false
+$siteUrlFilterWasAutoDisabled = $false
 
 function Clear-RowBuffer {
     if ($rowBuffer.Count -eq 0) { return }
@@ -353,19 +365,46 @@ try {
     $usageRowsTotal = @($usageRows).Count
     foreach ($row in $usageRows) {
         $siteUrl = (Get-CsvValue $row 'Site URL') -replace '/$',''
-        if (-not $siteUrl) { continue }
-        $usageRowsWithSiteUrl++
-        $included = (-not $SiteUrls -or $SiteUrls.Count -eq 0) -or ($SiteUrls | Where-Object { $_.TrimEnd('/') -eq $siteUrl })
+        if ($siteUrl) {
+            $usageRowsWithSiteUrl++
+        }
+
+        # In concealed reports, Site URL can be blank. Fall back to stable identifiers.
+        $siteIdentifier = if ($siteUrl) {
+            $siteUrl
+        } else {
+            Get-CsvValueAny -Row $row -Names @('Site Id','Site ID','Site Name')
+        }
+
+        if (-not $siteIdentifier) { continue }
+        $usageRowsWithSiteIdentifier++
+
+        if (-not $siteUrl -and $SiteUrls -and $SiteUrls.Count -gt 0 -and -not $ignoreSiteUrlFilterDueToConcealment) {
+            $ignoreSiteUrlFilterDueToConcealment = $true
+            $siteUrlFilterWasAutoDisabled = $true
+            Write-Warn "Concealed report data detected (blank Site URL). Ignoring -SiteUrls filter and exporting all returned sites."
+        }
+
+        $included =
+            (-not $SiteUrls -or $SiteUrls.Count -eq 0) -or
+            $ignoreSiteUrlFilterDueToConcealment -or
+            ($siteUrl -and ($SiteUrls | Where-Object { $_.TrimEnd('/') -eq $siteUrl }))
         if (-not $included) { continue }
         $usageRowsMatchedScope++
         $ownerName = Get-CsvValue $row 'Owner Display Name'
-        $siteTitle = if ($siteUrl) { $siteUrl.TrimEnd('/').Split('/')[-1] } else { $ownerName }
+        $siteTitle = if ($siteUrl) {
+            $siteUrl.TrimEnd('/').Split('/')[-1]
+        } elseif ($ownerName) {
+            $ownerName
+        } else {
+            $siteIdentifier
+        }
         Add-ResultRows -Rows @([PSCustomObject]@{
             ExportDate      = $runExportDate
             ReportingPeriod = $periodLabel
             Source          = 'GRAPH_USAGE'
             SiteTitle       = $siteTitle
-            SiteUrl         = $siteUrl
+            SiteUrl         = $siteIdentifier
             InsightType     = 'SiteUsageSummary'
             Date            = (Get-CsvValue $row 'Report Refresh Date')
             QueryText       = ''
@@ -375,7 +414,7 @@ try {
             ClickCount      = (Get-CsvValue $row 'Page View Count')
         })
     }
-    Write-Step "Usage rows returned: $usageRowsTotal; rows with Site URL: $usageRowsWithSiteUrl; rows matching scope: $usageRowsMatchedScope"
+    Write-Step "Usage rows returned: $usageRowsTotal; rows with Site URL: $usageRowsWithSiteUrl; rows with site identifier: $usageRowsWithSiteIdentifier; rows matching scope: $usageRowsMatchedScope"
     Write-OK "Site usage report: $totalRows row(s) collected."
 } catch {
     Write-Fail "Site usage report failed: $_"
@@ -393,11 +432,17 @@ if ($totalRows -eq 0) {
     if ($usageRowsTotal -eq 0) {
         Write-Host "  • The usage report returned no rows for the selected period." -ForegroundColor Gray
     }
-    if ($usageRowsTotal -gt 0 -and $usageRowsWithSiteUrl -eq 0) {
-        Write-Host "  • Site URL values are concealed/anonymized in tenant report settings." -ForegroundColor Gray
+    if ($usageRowsTotal -gt 0 -and $usageRowsWithSiteUrl -eq 0 -and $usageRowsWithSiteIdentifier -gt 0) {
+        Write-Host "  • Site URL values are concealed/anonymized in tenant report settings; exporting by fallback site identifier." -ForegroundColor Gray
     }
-    if ($usageRowsWithSiteUrl -gt 0 -and $usageRowsMatchedScope -eq 0 -and $SiteUrls -and $SiteUrls.Count -gt 0) {
+    if ($usageRowsTotal -gt 0 -and $usageRowsWithSiteIdentifier -eq 0) {
+        Write-Host "  • The report rows did not include usable site identifiers (Site URL/Site Id/Site Name)." -ForegroundColor Gray
+    }
+    if ($usageRowsWithSiteIdentifier -gt 0 -and $usageRowsMatchedScope -eq 0 -and $SiteUrls -and $SiteUrls.Count -gt 0) {
         Write-Host "  • None of the returned site URLs matched -SiteUrls (check concealment setting or URL normalization)." -ForegroundColor Gray
+    }
+    if ($siteUrlFilterWasAutoDisabled) {
+        Write-Host "  • -SiteUrls was automatically ignored because Site URL values were concealed in the report." -ForegroundColor Gray
     }
     if ($usageRowsMatchedScope -gt 0 -and $totalRows -eq 0) {
         Write-Host "  • Rows were matched but filtered out (for example, de-duplication removed duplicates)." -ForegroundColor Gray
@@ -433,6 +478,10 @@ Write-Host ("=" * 60) -ForegroundColor Cyan
 Write-Host "  Done." -ForegroundColor Cyan
 Write-Host ("=" * 60) -ForegroundColor Cyan
 Write-Host ""
+if ($siteUrlFilterWasAutoDisabled) {
+    Write-Warn "-SiteUrls was ignored because tenant report concealment is enabled. Disable concealment to filter by real URLs."
+    Write-Host ""
+}
 #endregion
 #region ── Column reference ───────────────────────────────────────────────────
 <#
