@@ -119,6 +119,25 @@ function Write-Fail {
     param([string]$Text)
     Write-Host "  ✘ $Text" -ForegroundColor Red
 }
+function Get-JwtClaims {
+    # Decodes the payload of a JWT (no signature validation) so we can inspect
+    # the audience and application roles actually present on an access token.
+    param([string]$Token)
+    if ([string]::IsNullOrWhiteSpace($Token)) { return $null }
+    $parts = $Token.Split('.')
+    if ($parts.Count -lt 2) { return $null }
+    $payload = $parts[1].Replace('-', '+').Replace('_', '/')
+    switch ($payload.Length % 4) {
+        2 { $payload += '==' }
+        3 { $payload += '=' }
+    }
+    try {
+        $json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload))
+        return $json | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
 #endregion
 #region ── Module check ───────────────────────────────────────────────────────
 Write-Header "SharePoint Online Site Usage Insights Exporter"
@@ -285,6 +304,26 @@ function Add-ResultRows {
 # Retrieve the tenant-wide SharePoint site usage report (page views and site
 # activity per site) and filter to the requested site scope.
 $usagePeriod = if ($selectedReportPeriod -eq 'Last28Days') { 'D30' } else { 'D180' }
+
+# Inspect the Graph token so permission problems are obvious rather than opaque.
+try {
+    $graphToken = Get-PnPGraphAccessToken
+    $claims     = Get-JwtClaims -Token $graphToken
+    if ($claims) {
+        $roles = if ($claims.PSObject.Properties['roles'] -and $claims.roles) { ($claims.roles -join ', ') } else { '(none)' }
+        Write-Step "Graph token audience: $($claims.aud)"
+        Write-Step "Graph token app roles: $roles"
+        if ($roles -notmatch 'Reports\.Read\.All') {
+            Write-Warn "The Graph token is missing the Reports.Read.All application role."
+            Write-Warn "In Entra: App registration > API permissions > Microsoft Graph > Application permissions > add Reports.Read.All, then Grant admin consent."
+        }
+    } else {
+        Write-Warn "Could not decode the Graph access token to verify permissions."
+    }
+} catch {
+    Write-Warn "Could not acquire a Graph access token: $($_.Exception.Message)"
+}
+
 Write-Step "Retrieving SharePoint Site Usage report (period '$usagePeriod') …"
 try {
     $usageUrl  = "v1.0/reports/getSharePointSiteUsageDetail(period='$usagePeriod')"
