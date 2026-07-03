@@ -143,17 +143,13 @@ if ($AllSites -and $SiteUrls -and $SiteUrls.Count -gt 0) {
 }
 
 # Site scope
-$isSpecificSiteScope = $false
-if ($SiteUrls -and $SiteUrls.Count -gt 0) {
-    $isSpecificSiteScope = $true
-} elseif (-not $AllSites) {
+if (-not $SiteUrls -and -not $AllSites) {
     Write-Host ""
     Write-Host "  Which sites do you want to query?" -ForegroundColor Yellow
     Write-Host "  [1] All SharePoint sites (excludes OneDrive)"
     Write-Host "  [2] Specific sites (you will be prompted)"
     do { $scopeChoice = Read-Host "  Choice (1 or 2)" } while ($scopeChoice -notin '1','2')
     if ($scopeChoice -eq '2') {
-        $isSpecificSiteScope = $true
         Write-Host "  Enter site URLs one per line.  Leave blank and press Enter when done." -ForegroundColor Gray
         $collected = [System.Collections.Generic.List[string]]::new()
         while ($true) {
@@ -268,10 +264,6 @@ $runExportDate   = Get-Date -Format 'yyyy-MM-dd HH:mm'
 $totalRows       = 0
 $insightCounts   = @{}
 $siteCounts      = @{}
-$siteLookup      = @{}
-foreach ($s in $sites) {
-    $siteLookup[$s.Url.TrimEnd('/')] = $s
-}
 
 function Flush-RowBuffer {
     if ($rowBuffer.Count -eq 0) { return }
@@ -313,10 +305,11 @@ function Add-ResultRows {
         $insightCounts[$insightType]++
 
         $siteTitle = if ($row.SiteTitle) { [string]$row.SiteTitle } else { '(Unknown)' }
-        if (-not $siteCounts.ContainsKey($siteTitle)) {
-            $siteCounts[$siteTitle] = 0
+        $siteKey = if ($siteUrlNorm) { $siteUrlNorm } else { $siteTitle }
+        if (-not $siteCounts.ContainsKey($siteKey)) {
+            $siteCounts[$siteKey] = 0
         }
-        $siteCounts[$siteTitle]++
+        $siteCounts[$siteKey]++
 
         if ($rowBuffer.Count -ge $bufferFlushSize) {
             Flush-RowBuffer
@@ -374,62 +367,6 @@ function ConvertFrom-SPOAnalyticsResponse {
         }
     }
 }
-# ── Tenant-wide Graph report (all sites at once) ──────────────────────────────
-Write-Step "Querying Microsoft Graph search analytics (tenant-wide) …"
-$graphInsightTypes = @(
-    @{ Name = 'TopQueries';      Endpoint = "getSiteSearchQueries" }
-    @{ Name = 'NoResultQueries'; Endpoint = "getSiteNoResultQueries" }
-    @{ Name = 'AbandonedQueries';Endpoint = "getSiteSearchAbandonedQueries" }
-)
-foreach ($insight in $graphInsightTypes) {
-    $graphUrl = "beta/reports/search/$($insight.Endpoint)" +
-                "(aggregationInterval='$aggInterval'," +
-                "startDateTime='${startDateStr}T00:00:00Z'," +
-                "endDateTime='${endDateStr}T23:59:59Z')"
-    try {
-        $graphData = Invoke-PnPGraphMethod -Url $graphUrl -Method Get
-        if ($graphData -and $graphData.value) {
-            foreach ($entry in $graphData.value) {
-                $matchedSite = $null
-                # Filter to only the sites we care about
-                $entryUrl = if ($entry.PSObject.Properties['siteUrl']) { $entry.siteUrl.TrimEnd('/') } else { '' }
-                if ($entryUrl) {
-                    $matchedSite = $siteLookup[$entryUrl]
-                    if ($isSpecificSiteScope -and -not $matchedSite) {
-                        continue
-                    }
-                    if (-not $matchedSite) {
-                        $matchedSite = [PSCustomObject]@{
-                            Title = $entryUrl.Split('/')[-1]
-                            Url   = $entryUrl
-                        }
-                        $siteLookup[$entryUrl] = $matchedSite
-                    }
-                }
-                $row = [PSCustomObject]@{
-                    ExportDate      = $runExportDate
-                    ReportingPeriod = $periodLabel
-                    Source          = 'GRAPH'
-                    SiteTitle       = if ($matchedSite) { $matchedSite.Title } else { '' }
-                    SiteUrl         = if ($entry.PSObject.Properties['siteUrl']) { $entry.siteUrl } else { '' }
-                    InsightType     = $insight.Name
-                    Date            = if ($entry.PSObject.Properties['date'])           { $entry.date }           else { '' }
-                    QueryText       = if ($entry.PSObject.Properties['queryText'])       { $entry.queryText }       else { '' }
-                    QueryCount      = if ($entry.PSObject.Properties['queryCount'])      { $entry.queryCount }      else { '' }
-                    AbandonedCount  = if ($entry.PSObject.Properties['abandonedCount'])  { $entry.abandonedCount }  else { '' }
-                    NoResultsCount  = if ($entry.PSObject.Properties['noResultCount'])   { $entry.noResultCount }   else { '' }
-                    ClickCount      = if ($entry.PSObject.Properties['clickCount'])      { $entry.clickCount }      else { '' }
-                }
-                Add-ResultRows -Rows @($row)
-            }
-            Write-OK "  Graph: $($insight.Name) — $($graphData.value.Count) record(s)"
-        } else {
-            Write-Warn "  Graph: $($insight.Name) — no data returned"
-        }
-    } catch {
-        Write-Warn "  Graph: $($insight.Name) — endpoint unavailable ($_)"
-    }
-}
 # ── Per-site SharePoint REST analytics (supplemental) ─────────────────────────
 $siteIndex = 0
 foreach ($site in $sites) {
@@ -438,10 +375,6 @@ foreach ($site in $sites) {
     Write-Progress -Activity "Querying site analytics" `
                    -Status "$siteIndex of $($sites.Count): $($site.Title)" `
                    -PercentComplete $pct
-    if ($HeartbeatIntervalSites -gt 0 -and
-        (($siteIndex % $HeartbeatIntervalSites) -eq 0 -or $siteIndex -eq $sites.Count)) {
-        Write-Step "Heartbeat: processed $siteIndex/$($sites.Count) sites ($pct%). Rows written so far: $totalRows"
-    }
     $spoInsights = @(
         @{ Type = 'TopQueries';       Endpoint = 'GetTopQueries' }
         @{ Type = 'NoResultQueries';  Endpoint = 'GetNoResultQueries' }
@@ -462,6 +395,10 @@ foreach ($site in $sites) {
         if ($parsed) {
             Add-ResultRows -Rows $parsed
         }
+    }
+    if ($HeartbeatIntervalSites -gt 0 -and
+        (($siteIndex % $HeartbeatIntervalSites) -eq 0 -or $siteIndex -eq $sites.Count)) {
+        Write-Step "Heartbeat: processed $siteIndex/$($sites.Count) sites ($pct%). Rows written so far: $totalRows"
     }
 }
 Write-Progress -Activity "Querying site analytics" -Completed
