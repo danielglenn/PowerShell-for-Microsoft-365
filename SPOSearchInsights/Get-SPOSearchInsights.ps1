@@ -18,29 +18,60 @@
     Optional. One or more site URLs to query.
     If omitted, every non-OneDrive SharePoint site is queried.
     Example: @('https://contoso.sharepoint.com/sites/HR','https://contoso.sharepoint.com/sites/IT')
+.PARAMETER AllSites
+    Optional switch to run against all SharePoint sites (excluding OneDrive)
+    without prompting for site scope.
 .PARAMETER OutputFolder
     Folder where the CSV file is written.  Defaults to the current directory.
 .PARAMETER ClientId
-    Optional Azure AD App (client) ID for app-only auth.
-    When omitted the script uses interactive (delegated) login.
-.EXAMPLE
-    .\Get-SPOSearchInsights.ps1 -TenantAdminUrl "https://contoso-admin.sharepoint.com"
+    Azure AD App (client) ID used for certificate-based app-only auth.
+.PARAMETER TenantId
+    Microsoft Entra tenant ID (GUID) used for certificate-based app-only auth.
+.PARAMETER Thumbprint
+    Certificate thumbprint from the local certificate store used for app-only auth.
 .EXAMPLE
     .\Get-SPOSearchInsights.ps1 `
         -TenantAdminUrl "https://contoso-admin.sharepoint.com" `
-        -SiteUrls @("https://contoso.sharepoint.com/sites/Marketing") `
+        -ClientId "11111111-2222-3333-4444-555555555555" `
+        -TenantId "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" `
+        -Thumbprint "ABCDEF1234567890ABCDEF1234567890ABCDEF12" `
+        -AllSites `
+        -OutputFolder "C:\Reports"
+.EXAMPLE
+    .\Get-SPOSearchInsights.ps1 `
+        -TenantAdminUrl "https://contoso-admin.sharepoint.com" `
+        -ClientId "11111111-2222-3333-4444-555555555555" `
+        -TenantId "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" `
+        -Thumbprint "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+.EXAMPLE
+    .\Get-SPOSearchInsights.ps1 `
+        -TenantAdminUrl "https://contoso-admin.sharepoint.com" `
+        -ClientId "11111111-2222-3333-4444-555555555555" `
+        -TenantId "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" `
+        -Thumbprint "ABCDEF1234567890ABCDEF1234567890ABCDEF12" `
+        -SiteUrls @(
+            "https://contoso.sharepoint.com/sites/Marketing",
+            "https://contoso.sharepoint.com/sites/HR",
+            "https://contoso.sharepoint.com/sites/IT"
+        ) `
         -OutputFolder "C:\Reports"
 #>
 [CmdletBinding()]
 param(
-    [Parameter()]
+    [Parameter(Mandatory = $true)]
     [string]$TenantAdminUrl,
     [Parameter()]
     [string[]]$SiteUrls,
     [Parameter()]
-    [string]$OutputFolder = (Get-Location).Path,
+    [switch]$AllSites,
     [Parameter()]
-    [string]$ClientId
+    [string]$OutputFolder = (Get-Location).Path,
+    [Parameter(Mandatory = $true)]
+    [string]$ClientId,
+    [Parameter(Mandatory = $true)]
+    [string]$TenantId,
+    [Parameter(Mandatory = $true)]
+    [string]$Thumbprint
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -79,19 +110,25 @@ if (-not (Get-Module -ListAvailable -Name 'PnP.PowerShell' | Where-Object { $_.V
 Import-Module PnP.PowerShell -MinimumVersion '2.0.0' -ErrorAction Stop
 #endregion
 #region ── Interactive prompts ────────────────────────────────────────────────
-# Tenant Admin URL
-if (-not $TenantAdminUrl) {
-    $TenantAdminUrl = (Read-Host "  Enter your SharePoint Admin URL`n  (e.g. https://contoso-admin.sharepoint.com)").Trim().TrimEnd('/')
-}
 $TenantAdminUrl = $TenantAdminUrl.TrimEnd('/')
+
+if ($AllSites -and $SiteUrls -and $SiteUrls.Count -gt 0) {
+    Write-Fail "Use either -AllSites or -SiteUrls, not both."
+    exit 1
+}
+
 # Site scope
-if (-not $SiteUrls -or $SiteUrls.Count -eq 0) {
+$isSpecificSiteScope = $false
+if ($SiteUrls -and $SiteUrls.Count -gt 0) {
+    $isSpecificSiteScope = $true
+} elseif (-not $AllSites) {
     Write-Host ""
     Write-Host "  Which sites do you want to query?" -ForegroundColor Yellow
     Write-Host "  [1] All SharePoint sites (excludes OneDrive)"
     Write-Host "  [2] Specific sites (you will be prompted)"
     do { $scopeChoice = Read-Host "  Choice (1 or 2)" } while ($scopeChoice -notin '1','2')
     if ($scopeChoice -eq '2') {
+        $isSpecificSiteScope = $true
         Write-Host "  Enter site URLs one per line.  Leave blank and press Enter when done." -ForegroundColor Gray
         $collected = [System.Collections.Generic.List[string]]::new()
         while ($true) {
@@ -116,12 +153,10 @@ $endDate   = (Get-Date).Date
 if ($periodChoice -eq '1') {
     $startDate       = $endDate.AddDays(-28)
     $periodLabel     = "Last_28_Days"
-    $graphPeriod     = "D30"          # closest Graph Reports period
     $aggInterval     = "Daily"
 } else {
     $startDate       = $endDate.AddMonths(-12)
     $periodLabel     = "Last_12_Months"
-    $graphPeriod     = "D180"         # Graph supports up to D180; 12 months via beta date range
     $aggInterval     = "Monthly"
 }
 $startDateStr = $startDate.ToString("yyyy-MM-dd")
@@ -131,11 +166,24 @@ Write-OK "Period : $startDateStr → $endDateStr  ($periodLabel)"
 #endregion
 #region ── Connect ────────────────────────────────────────────────────────────
 Write-Header "Connecting to SharePoint Online"
-Write-Step "Authenticating …"
-$connectParams = @{ Url = $TenantAdminUrl }
-if ($ClientId) { $connectParams['ClientId'] = $ClientId }
+Write-Step "Authenticating with app-only certificate credentials …"
+
+if ([string]::IsNullOrWhiteSpace($ClientId) -or
+    [string]::IsNullOrWhiteSpace($TenantId) -or
+    [string]::IsNullOrWhiteSpace($Thumbprint)) {
+    Write-Fail "ClientId, TenantId, and Thumbprint are required for app-only auth."
+    exit 1
+}
+
+$connectParams = @{
+    Url         = $TenantAdminUrl
+    ClientId    = $ClientId
+    Tenant      = $TenantId
+    Thumbprint  = $Thumbprint
+}
+
 try {
-    Connect-PnPOnline @connectParams -Interactive
+    Connect-PnPOnline @connectParams
     Write-OK "Connected to $TenantAdminUrl"
 } catch {
     Write-Fail "Connection failed: $_"
@@ -171,14 +219,77 @@ if ($SiteUrls -and $SiteUrls.Count -gt 0) {
 #endregion
 #region ── Data collection ────────────────────────────────────────────────────
 Write-Header "Collecting Search Insights"
-$allRows = [System.Collections.Generic.List[PSCustomObject]]::new()
+$columnOrder = @(
+    'ExportDate','ReportingPeriod','SiteTitle','SiteUrl',
+    'InsightType','Date','QueryText',
+    'QueryCount','AbandonedCount','NoResultsCount','ClickCount'
+)
+
+if (-not (Test-Path $OutputFolder)) {
+    New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
+}
+
+$timestamp       = Get-Date -Format 'yyyyMMdd_HHmmss'
+$csvFile         = Join-Path $OutputFolder "SPO_SearchInsights_${periodLabel}_${timestamp}.csv"
+$bufferFlushSize = 500
+$rowBuffer       = [System.Collections.Generic.List[PSCustomObject]]::new()
+$seenRowKeys     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$totalRows       = 0
+$insightCounts   = @{}
+$siteCounts      = @{}
+$siteLookup      = @{}
+foreach ($s in $sites) {
+    $siteLookup[$s.Url.TrimEnd('/')] = $s
+}
+
+function Flush-RowBuffer {
+    if ($rowBuffer.Count -eq 0) { return }
+    $append = Test-Path $csvFile
+    $rowBuffer |
+        Select-Object $columnOrder |
+        Export-Csv -Path $csvFile -NoTypeInformation -Encoding UTF8 -Append:$append
+    $rowBuffer.Clear()
+}
+
+function Add-ResultRows {
+    param([object[]]$Rows)
+
+    foreach ($row in $Rows) {
+        if (-not $row) { continue }
+
+        $siteUrlNorm = if ($row.SiteUrl) { $row.SiteUrl.TrimEnd('/') } else { '' }
+        $insightType = if ($row.InsightType) { [string]$row.InsightType } else { '' }
+        $dateValue   = if ($row.Date) { [string]$row.Date } else { '' }
+        $queryText   = if ($row.QueryText) { [string]$row.QueryText } else { '' }
+        $dedupeKey   = "$siteUrlNorm|$insightType|$dateValue|$queryText"
+
+        if (-not $seenRowKeys.Add($dedupeKey)) { continue }
+
+        $row.SiteUrl = $siteUrlNorm
+        $rowBuffer.Add($row)
+        $script:totalRows++
+
+        if (-not $insightCounts.ContainsKey($insightType)) {
+            $insightCounts[$insightType] = 0
+        }
+        $insightCounts[$insightType]++
+
+        $siteTitle = if ($row.SiteTitle) { [string]$row.SiteTitle } else { '(Unknown)' }
+        if (-not $siteCounts.ContainsKey($siteTitle)) {
+            $siteCounts[$siteTitle] = 0
+        }
+        $siteCounts[$siteTitle]++
+
+        if ($rowBuffer.Count -ge $bufferFlushSize) {
+            Flush-RowBuffer
+        }
+    }
+}
 # ── Helper: call SharePoint REST analytics endpoint ──────────────────────────
 function Invoke-SiteSearchAnalytics {
     param(
         [string]$SiteUrl,
-        [string]$SiteTitle,
         [string]$AnalyticsEndpoint,   # relative, e.g. "GetTopQueries"
-        [string]$InsightType,
         [string]$StartDate,
         [string]$EndDate
     )
@@ -190,52 +301,6 @@ function Invoke-SiteSearchAnalytics {
     } catch {
         # Not all sites expose all endpoints; silently return null
         return $null
-    }
-}
-# ── Helper: call Microsoft Graph search analytics (beta) ─────────────────────
-function Invoke-GraphSearchReport {
-    param(
-        [string]$SiteId,
-        [string]$AggInterval,
-        [string]$StartDateTime,
-        [string]$EndDateTime
-    )
-    $url = "beta/reports/search/getSiteSearchQueries(aggregationInterval='$AggInterval'," +
-           "startDateTime='${StartDateTime}T00:00:00Z',endDateTime='${EndDateTime}T23:59:59Z')"
-    try {
-        $resp = Invoke-PnPGraphMethod -Url $url -Method Get
-        return $resp
-    } catch {
-        return $null
-    }
-}
-# ── Helper: parse Graph search response into rows ─────────────────────────────
-function ConvertFrom-GraphSearchResponse {
-    param(
-        [object]$Response,
-        [string]$SiteTitle,
-        [string]$SiteUrl,
-        [string]$InsightType,
-        [string]$PeriodLabel
-    )
-    if (-not $Response -or -not $Response.value) { return }
-    foreach ($entry in $Response.value) {
-        # Filter to this site if siteUrl is present in the response
-        if ($entry.PSObject.Properties['siteUrl'] -and
-            $entry.siteUrl.TrimEnd('/') -ne $SiteUrl.TrimEnd('/')) { continue }
-        [PSCustomObject]@{
-            ExportDate     = (Get-Date -Format 'yyyy-MM-dd HH:mm')
-            ReportingPeriod = $PeriodLabel
-            SiteTitle      = $SiteTitle
-            SiteUrl        = $SiteUrl
-            InsightType    = $InsightType
-            Date           = if ($entry.PSObject.Properties['date'])           { $entry.date }           else { '' }
-            QueryText      = if ($entry.PSObject.Properties['queryText'])       { $entry.queryText }       else { '' }
-            QueryCount     = if ($entry.PSObject.Properties['queryCount'])      { $entry.queryCount }      else { '' }
-            AbandonedCount = if ($entry.PSObject.Properties['abandonedCount'])  { $entry.abandonedCount }  else { '' }
-            NoResultsCount = if ($entry.PSObject.Properties['clickCount'])      { $entry.clickCount }      else { '' }
-            ClickCount     = if ($entry.PSObject.Properties['noResultCount'])   { $entry.noResultCount }   else { '' }
-        }
     }
 }
 # ── Helper: parse SharePoint REST analytics response ─────────────────────────
@@ -287,20 +352,19 @@ foreach ($insight in $graphInsightTypes) {
         if ($graphData -and $graphData.value) {
             foreach ($entry in $graphData.value) {
                 $matchedSite = $null
-                if ($sites.Count -lt 500) {
-                    # Filter to only the sites we care about
-                    $entryUrl = if ($entry.PSObject.Properties['siteUrl']) { $entry.siteUrl.TrimEnd('/') } else { '' }
-                    if ($scopeChoice -eq '2' -or ($SiteUrls -and $SiteUrls.Count -gt 0)) {
-                        $matchedSite = $sites | Where-Object { $_.Url -eq $entryUrl } | Select-Object -First 1
-                        if (-not $matchedSite) { continue }
-                    } else {
-                        $matchedSite = $sites | Where-Object { $_.Url -eq $entryUrl } | Select-Object -First 1
-                        if (-not $matchedSite) {
-                            $matchedSite = [PSCustomObject]@{
-                                Title = $entryUrl.Split('/')[-1]
-                                Url   = $entryUrl
-                            }
+                # Filter to only the sites we care about
+                $entryUrl = if ($entry.PSObject.Properties['siteUrl']) { $entry.siteUrl.TrimEnd('/') } else { '' }
+                if ($entryUrl) {
+                    $matchedSite = $siteLookup[$entryUrl]
+                    if ($isSpecificSiteScope -and -not $matchedSite) {
+                        continue
+                    }
+                    if (-not $matchedSite) {
+                        $matchedSite = [PSCustomObject]@{
+                            Title = $entryUrl.Split('/')[-1]
+                            Url   = $entryUrl
                         }
+                        $siteLookup[$entryUrl] = $matchedSite
                     }
                 }
                 $row = [PSCustomObject]@{
@@ -316,7 +380,7 @@ foreach ($insight in $graphInsightTypes) {
                     NoResultsCount  = if ($entry.PSObject.Properties['noResultCount'])   { $entry.noResultCount }   else { '' }
                     ClickCount      = if ($entry.PSObject.Properties['clickCount'])      { $entry.clickCount }      else { '' }
                 }
-                $allRows.Add($row)
+                Add-ResultRows -Rows @($row)
             }
             Write-OK "  Graph: $($insight.Name) — $($graphData.value.Count) record(s)"
         } else {
@@ -342,9 +406,7 @@ foreach ($site in $sites) {
     foreach ($insight in $spoInsights) {
         $resp = Invoke-SiteSearchAnalytics `
                     -SiteUrl       $site.Url `
-                    -SiteTitle     $site.Title `
                     -AnalyticsEndpoint $insight.Endpoint `
-                    -InsightType   $insight.Type `
                     -StartDate     $startDateStr `
                     -EndDate       $endDateStr
         $parsed = ConvertFrom-SPOAnalyticsResponse `
@@ -354,7 +416,7 @@ foreach ($site in $sites) {
                     -InsightType $insight.Type `
                     -PeriodLabel $periodLabel
         if ($parsed) {
-            foreach ($r in $parsed) { $allRows.Add($r) }
+            Add-ResultRows -Rows $parsed
         }
     }
 }
@@ -363,7 +425,7 @@ Write-Progress -Activity "Querying site analytics" -Completed
 #region ── Fallback: Graph site usage report ──────────────────────────────────
 # If no search-specific rows were collected, fall back to the GA usage report
 # which at minimum shows page views and site activity per site.
-if ($allRows.Count -eq 0) {
+if ($totalRows -eq 0) {
     Write-Warn "No search-insight data returned from Graph or REST APIs."
     Write-Step "Falling back to SharePoint Site Usage report (D30 / D180) …"
     $usagePeriod = if ($periodChoice -eq '1') { 'D30' } else { 'D180' }
@@ -373,9 +435,9 @@ if ($allRows.Count -eq 0) {
         $usageRows = $usageCsv | ConvertFrom-Csv
         foreach ($row in $usageRows) {
             $siteUrl  = ($row.'Site URL' -replace '/$','')
-            $included = ($SiteUrls.Count -eq 0) -or ($SiteUrls | Where-Object { $_.TrimEnd('/') -eq $siteUrl })
+            $included = (-not $SiteUrls -or $SiteUrls.Count -eq 0) -or ($SiteUrls | Where-Object { $_.TrimEnd('/') -eq $siteUrl })
             if (-not $included) { continue }
-            $allRows.Add([PSCustomObject]@{
+            Add-ResultRows -Rows @([PSCustomObject]@{
                 ExportDate      = (Get-Date -Format 'yyyy-MM-dd HH:mm')
                 ReportingPeriod = $periodLabel
                 SiteTitle       = $row.'Site Name'
@@ -389,19 +451,15 @@ if ($allRows.Count -eq 0) {
                 ClickCount      = $row.'Page View Count'
             })
         }
-        Write-OK "Site usage report: $($allRows.Count) row(s) collected."
+        Write-OK "Site usage report: $totalRows row(s) collected."
     } catch {
         Write-Fail "Site usage report also failed: $_"
     }
 }
 #endregion
-#region ── Deduplicate ────────────────────────────────────────────────────────
-$allRows = $allRows |
-    Sort-Object SiteUrl, InsightType, Date, QueryText -Unique
-#endregion
 #region ── Export ─────────────────────────────────────────────────────────────
 Write-Header "Exporting Results"
-if ($allRows.Count -eq 0) {
+if ($totalRows -eq 0) {
     Write-Warn "No data was collected.  The CSV will not be created."
     Write-Host ""
     Write-Host "  Possible reasons:" -ForegroundColor Gray
@@ -409,43 +467,29 @@ if ($allRows.Count -eq 0) {
     Write-Host "  • Search Insights haven't been enabled on these sites." -ForegroundColor Gray
     Write-Host "  • The selected period has no recorded search activity." -ForegroundColor Gray
 } else {
-    if (-not (Test-Path $OutputFolder)) {
-        New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
-    }
-    $timestamp  = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $csvFile    = Join-Path $OutputFolder "SPO_SearchInsights_${periodLabel}_${timestamp}.csv"
-    $columnOrder = @(
-        'ExportDate','ReportingPeriod','SiteTitle','SiteUrl',
-        'InsightType','Date','QueryText',
-        'QueryCount','AbandonedCount','NoResultsCount','ClickCount'
-    )
-    $allRows |
-        Select-Object $columnOrder |
-        Export-Csv -Path $csvFile -NoTypeInformation -Encoding UTF8
-    Write-OK "Exported $($allRows.Count) row(s) to:"
+    Flush-RowBuffer
+    Write-OK "Exported $totalRows row(s) to:"
     Write-Host "  $csvFile" -ForegroundColor White
     # Quick summary table
     Write-Host ""
     Write-Host "  Summary by InsightType:" -ForegroundColor Cyan
     Write-Host ("  {0,-25} {1,8}" -f "Insight Type", "Rows") -ForegroundColor Cyan
     Write-Host ("  {0,-25} {1,8}" -f ("-" * 25), ("-" * 8)) -ForegroundColor Cyan
-    $allRows |
-        Group-Object InsightType |
+    $insightCounts.GetEnumerator() |
         Sort-Object Name |
         ForEach-Object {
-            Write-Host ("  {0,-25} {1,8}" -f $_.Name, $_.Count)
+            Write-Host ("  {0,-25} {1,8}" -f $_.Name, $_.Value)
         }
     Write-Host ""
     Write-Host "  Summary by Site:" -ForegroundColor Cyan
     Write-Host ("  {0,-40} {1,8}" -f "Site", "Rows") -ForegroundColor Cyan
     Write-Host ("  {0,-40} {1,8}" -f ("-" * 40), ("-" * 8)) -ForegroundColor Cyan
-    $allRows |
-        Group-Object SiteTitle |
-        Sort-Object Count -Descending |
+    $siteCounts.GetEnumerator() |
+        Sort-Object Value -Descending |
         Select-Object -First 20 |
         ForEach-Object {
-            $name = if ($_.Name.Length -gt 38) { $_.Name.Substring(0,37) + '…' } else { $_.Name }
-            Write-Host ("  {0,-40} {1,8}" -f $name, $_.Count)
+            $name = if ($_.Key.Length -gt 38) { $_.Key.Substring(0,37) + '…' } else { $_.Key }
+            Write-Host ("  {0,-40} {1,8}" -f $name, $_.Value)
         }
 }
 Write-Host ""
