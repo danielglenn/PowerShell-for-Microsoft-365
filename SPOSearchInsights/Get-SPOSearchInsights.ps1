@@ -330,7 +330,27 @@ function Invoke-SiteSearchAnalytics {
         $resp = Invoke-PnPSPRestMethod -Method Get -Url $apiPath
         return $resp
     } catch {
-        # Not all sites expose all endpoints; silently return null
+        $statusCode = $null
+        $responseBody = $null
+        if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) {
+            $statusCode = try { [int]$_.Exception.Response.StatusCode } catch { $null }
+            try {
+                $stream = $_.Exception.Response.GetResponseStream()
+                if ($stream) {
+                    $reader = [System.IO.StreamReader]::new($stream)
+                    $responseBody = $reader.ReadToEnd()
+                    $reader.Dispose()
+                }
+            } catch {
+                $responseBody = $null
+            }
+        }
+
+        Write-Warn "REST analytics call failed for $SiteUrl [$AnalyticsEndpoint]. Status: $statusCode. Error: $($_.Exception.Message)"
+        if ($responseBody) {
+            Write-Warn "Response body: $responseBody"
+        }
+
         return $null
     }
 }
