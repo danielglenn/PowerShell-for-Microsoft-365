@@ -9,5 +9,8 @@ Retrieves and lists all users and security groups with access to a SharePoint si
 ## List All SharePoint Site Files
 Retrieves a complete list of all files across provided SharePoint sites. It helps inventory and audit file storage.
 
+## List Files With Unique Permissions
+Find files in document libraries that have unique permissions (i.e., they do not inherit from the library).
+
 ## Reset SharePoint Library Permissions
 Resets permissions on SharePoint files in a document library to inherit from the library.
