@@ -1,3 +1,4 @@
+#Requires -Version 7.4
 #Requires -Modules @{ ModuleName = 'PnP.PowerShell'; ModuleVersion = '2.0.0' }
 <#
 .SYNOPSIS
@@ -8,6 +9,7 @@
     sites or a specific set of site URLs.  Results are exported to a
     well-formatted CSV file.
     Requires:
+        - PowerShell 7.4 or later
         - PnP.PowerShell module  (Install-Module PnP.PowerShell -Scope CurrentUser)
         - An account with SharePoint Administrator or Global Administrator role
         - Microsoft Graph permissions: Reports.Read.All, Sites.Read.All
@@ -21,6 +23,18 @@
 .PARAMETER AllSites
     Optional switch to run against all SharePoint sites (excluding OneDrive)
     without prompting for site scope.
+.PARAMETER ReportPeriod
+    Optional reporting period.
+    Accepted values: Last28Days or Last12Months.
+    If omitted, the script prompts for the reporting period.
+.PARAMETER NoDedupe
+    Optional switch to disable row de-duplication.
+    Useful for very large exports when preserving every row and minimizing
+    in-memory dedupe keys is preferred.
+.PARAMETER HeartbeatIntervalSites
+    Optional heartbeat interval for site processing status messages.
+    A message is written every N sites (default: 50).
+    Set to 0 to disable heartbeat messages.
 .PARAMETER OutputFolder
     Folder where the CSV file is written.  Defaults to the current directory.
 .PARAMETER ClientId
@@ -36,19 +50,22 @@
         -TenantId "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" `
         -Thumbprint "ABCDEF1234567890ABCDEF1234567890ABCDEF12" `
         -AllSites `
+        -ReportPeriod Last28Days `
         -OutputFolder "C:\Reports"
 .EXAMPLE
     .\Get-SPOSearchInsights.ps1 `
         -TenantAdminUrl "https://contoso-admin.sharepoint.com" `
         -ClientId "11111111-2222-3333-4444-555555555555" `
         -TenantId "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" `
-        -Thumbprint "ABCDEF1234567890ABCDEF1234567890ABCDEF12"
+        -Thumbprint "ABCDEF1234567890ABCDEF1234567890ABCDEF12" `
+        -ReportPeriod Last12Months
 .EXAMPLE
     .\Get-SPOSearchInsights.ps1 `
         -TenantAdminUrl "https://contoso-admin.sharepoint.com" `
         -ClientId "11111111-2222-3333-4444-555555555555" `
         -TenantId "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" `
         -Thumbprint "ABCDEF1234567890ABCDEF1234567890ABCDEF12" `
+        -ReportPeriod Last28Days `
         -SiteUrls @(
             "https://contoso.sharepoint.com/sites/Marketing",
             "https://contoso.sharepoint.com/sites/HR",
@@ -64,6 +81,14 @@ param(
     [string[]]$SiteUrls,
     [Parameter()]
     [switch]$AllSites,
+    [Parameter()]
+    [ValidateSet('Last28Days', 'Last12Months')]
+    [string]$ReportPeriod,
+    [Parameter()]
+    [switch]$NoDedupe,
+    [Parameter()]
+    [ValidateRange(0, 100000)]
+    [int]$HeartbeatIntervalSites = 50,
     [Parameter()]
     [string]$OutputFolder = (Get-Location).Path,
     [Parameter(Mandatory = $true)]
@@ -144,13 +169,18 @@ if ($SiteUrls -and $SiteUrls.Count -gt 0) {
     }
 }
 # Time period
-Write-Host ""
-Write-Host "  Select the reporting period:" -ForegroundColor Yellow
-Write-Host "  [1] Last 28 days"
-Write-Host "  [2] Last 12 months"
-do { $periodChoice = Read-Host "  Choice (1 or 2)" } while ($periodChoice -notin '1','2')
+$selectedReportPeriod = $ReportPeriod
+if (-not $selectedReportPeriod) {
+    Write-Host ""
+    Write-Host "  Select the reporting period:" -ForegroundColor Yellow
+    Write-Host "  [1] Last 28 days"
+    Write-Host "  [2] Last 12 months"
+    do { $periodChoice = Read-Host "  Choice (1 or 2)" } while ($periodChoice -notin '1','2')
+    $selectedReportPeriod = if ($periodChoice -eq '1') { 'Last28Days' } else { 'Last12Months' }
+}
+
 $endDate   = (Get-Date).Date
-if ($periodChoice -eq '1') {
+if ($selectedReportPeriod -eq 'Last28Days') {
     $startDate       = $endDate.AddDays(-28)
     $periodLabel     = "Last_28_Days"
     $aggInterval     = "Daily"
@@ -203,12 +233,12 @@ if ($SiteUrls -and $SiteUrls.Count -gt 0) {
     Write-OK "$($sites.Count) site(s) specified."
 } else {
     Write-Step "Retrieving all SharePoint sites (this may take a moment) …"
-    $rawSites = Get-PnPTenantSite -IncludeOneDriveSites:$false |
-                Where-Object {
-                    $_.Template -notlike '*SPSPERS*' -and
-                    $_.Template -notlike '*REDIRECT*'
-                }
-    $sites = $rawSites | ForEach-Object {
+    $sites = Get-PnPTenantSite -IncludeOneDriveSites:$false |
+             Where-Object {
+                 $_.Template -notlike '*SPSPERS*' -and
+                 $_.Template -notlike '*REDIRECT*'
+             } |
+             ForEach-Object {
         [PSCustomObject]@{
             Url   = $_.Url.TrimEnd('/')
             Title = $_.Title
@@ -220,7 +250,7 @@ if ($SiteUrls -and $SiteUrls.Count -gt 0) {
 #region ── Data collection ────────────────────────────────────────────────────
 Write-Header "Collecting Search Insights"
 $columnOrder = @(
-    'ExportDate','ReportingPeriod','SiteTitle','SiteUrl',
+    'ExportDate','ReportingPeriod','Source','SiteTitle','SiteUrl',
     'InsightType','Date','QueryText',
     'QueryCount','AbandonedCount','NoResultsCount','ClickCount'
 )
@@ -234,6 +264,7 @@ $csvFile         = Join-Path $OutputFolder "SPO_SearchInsights_${periodLabel}_${
 $bufferFlushSize = 500
 $rowBuffer       = [System.Collections.Generic.List[PSCustomObject]]::new()
 $seenRowKeys     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$runExportDate   = Get-Date -Format 'yyyy-MM-dd HH:mm'
 $totalRows       = 0
 $insightCounts   = @{}
 $siteCounts      = @{}
@@ -257,15 +288,22 @@ function Add-ResultRows {
     foreach ($row in $Rows) {
         if (-not $row) { continue }
 
+        $source      = if ($row.PSObject.Properties['Source'] -and $row.Source) { [string]$row.Source } else { 'Unknown' }
         $siteUrlNorm = if ($row.SiteUrl) { $row.SiteUrl.TrimEnd('/') } else { '' }
         $insightType = if ($row.InsightType) { [string]$row.InsightType } else { '' }
         $dateValue   = if ($row.Date) { [string]$row.Date } else { '' }
         $queryText   = if ($row.QueryText) { [string]$row.QueryText } else { '' }
-        $dedupeKey   = "$siteUrlNorm|$insightType|$dateValue|$queryText"
+        $queryCount  = if ($row.QueryCount) { [string]$row.QueryCount } else { '' }
+        $abandoned   = if ($row.AbandonedCount) { [string]$row.AbandonedCount } else { '' }
+        $noResults   = if ($row.NoResultsCount) { [string]$row.NoResultsCount } else { '' }
+        $clickCount  = if ($row.ClickCount) { [string]$row.ClickCount } else { '' }
+        $dedupeKey   = "$source|$siteUrlNorm|$insightType|$dateValue|$queryText|$queryCount|$abandoned|$noResults|$clickCount"
 
-        if (-not $seenRowKeys.Add($dedupeKey)) { continue }
+        if (-not $NoDedupe -and -not $seenRowKeys.Add($dedupeKey)) { continue }
 
         $row.SiteUrl = $siteUrlNorm
+        $row.Source = $source
+        $row.ExportDate = $runExportDate
         $rowBuffer.Add($row)
         $script:totalRows++
 
@@ -319,8 +357,9 @@ function ConvertFrom-SPOAnalyticsResponse {
     if (-not $items) { return }
     foreach ($item in $items) {
         [PSCustomObject]@{
-            ExportDate      = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+            ExportDate      = $runExportDate
             ReportingPeriod = $PeriodLabel
+            Source          = 'SPO_REST'
             SiteTitle       = $SiteTitle
             SiteUrl         = $SiteUrl
             InsightType     = $InsightType
@@ -368,8 +407,9 @@ foreach ($insight in $graphInsightTypes) {
                     }
                 }
                 $row = [PSCustomObject]@{
-                    ExportDate      = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+                    ExportDate      = $runExportDate
                     ReportingPeriod = $periodLabel
+                    Source          = 'GRAPH'
                     SiteTitle       = if ($matchedSite) { $matchedSite.Title } else { '' }
                     SiteUrl         = if ($entry.PSObject.Properties['siteUrl']) { $entry.siteUrl } else { '' }
                     InsightType     = $insight.Name
@@ -398,6 +438,10 @@ foreach ($site in $sites) {
     Write-Progress -Activity "Querying site analytics" `
                    -Status "$siteIndex of $($sites.Count): $($site.Title)" `
                    -PercentComplete $pct
+    if ($HeartbeatIntervalSites -gt 0 -and
+        (($siteIndex % $HeartbeatIntervalSites) -eq 0 -or $siteIndex -eq $sites.Count)) {
+        Write-Step "Heartbeat: processed $siteIndex/$($sites.Count) sites ($pct%). Rows written so far: $totalRows"
+    }
     $spoInsights = @(
         @{ Type = 'TopQueries';       Endpoint = 'GetTopQueries' }
         @{ Type = 'NoResultQueries';  Endpoint = 'GetNoResultQueries' }
@@ -428,7 +472,7 @@ Write-Progress -Activity "Querying site analytics" -Completed
 if ($totalRows -eq 0) {
     Write-Warn "No search-insight data returned from Graph or REST APIs."
     Write-Step "Falling back to SharePoint Site Usage report (D30 / D180) …"
-    $usagePeriod = if ($periodChoice -eq '1') { 'D30' } else { 'D180' }
+    $usagePeriod = if ($selectedReportPeriod -eq 'Last28Days') { 'D30' } else { 'D180' }
     try {
         $usageUrl  = "v1.0/reports/getSharePointSiteUsageDetail(period='$usagePeriod')"
         $usageCsv  = Invoke-PnPGraphMethod -Url $usageUrl -Method Get -Raw
@@ -438,8 +482,9 @@ if ($totalRows -eq 0) {
             $included = (-not $SiteUrls -or $SiteUrls.Count -eq 0) -or ($SiteUrls | Where-Object { $_.TrimEnd('/') -eq $siteUrl })
             if (-not $included) { continue }
             Add-ResultRows -Rows @([PSCustomObject]@{
-                ExportDate      = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+                ExportDate      = $runExportDate
                 ReportingPeriod = $periodLabel
+                Source          = 'GRAPH_USAGE'
                 SiteTitle       = $row.'Site Name'
                 SiteUrl         = $siteUrl
                 InsightType     = 'SiteUsageSummary'
@@ -504,6 +549,7 @@ Write-Host ""
   ─────────────────────────────────────────────────────────────
   ExportDate       Date/time the script was run
   ReportingPeriod  "Last_28_Days" or "Last_12_Months"
+    Source           Data source (GRAPH, SPO_REST, GRAPH_USAGE)
   SiteTitle        Display name of the site
   SiteUrl          Absolute URL of the site
   InsightType      TopQueries | NoResultQueries | AbandonedQueries | SiteUsageSummary
