@@ -15,6 +15,14 @@
     Note: SharePoint Online does not expose the site-level _api/search/analytics
     REST endpoints used by older SharePoint implementations, so this script
     uses the Microsoft Graph site usage report.
+
+    Note: If the Microsoft 365 admin center setting "Reports display concealed
+    user, group, and site names" is enabled (Settings > Org settings > Services >
+    Reports), the site usage report returns anonymized values for Site URL and
+    Owner Display Name instead of real names. When that setting is on, the
+    SiteUrl column will contain masked identifiers and the -SiteUrls filter will
+    not match real site URLs. Disable that setting to export real site names and
+    URLs.
 .PARAMETER TenantAdminUrl
     Your SharePoint Admin Centre URL.
     Example: https://contoso-admin.sharepoint.com
@@ -137,6 +145,14 @@ function Get-JwtClaims {
     } catch {
         return $null
     }
+}
+function Get-CsvValue {
+    # Safely read a named column from a ConvertFrom-Csv row; returns '' when the
+    # column is absent (StrictMode would otherwise throw on a missing property).
+    param($Row, [string]$Name)
+    $prop = $Row.PSObject.Properties[$Name]
+    if ($prop -and $null -ne $prop.Value) { return [string]$prop.Value }
+    return ''
 }
 #endregion
 #region ── Module check ───────────────────────────────────────────────────────
@@ -307,7 +323,7 @@ $usagePeriod = if ($selectedReportPeriod -eq 'Last28Days') { 'D30' } else { 'D18
 
 # Inspect the Graph token so permission problems are obvious rather than opaque.
 try {
-    $graphToken = Get-PnPGraphAccessToken
+    $graphToken = Get-PnPAccessToken -ResourceTypeName Graph
     $claims     = Get-JwtClaims -Token $graphToken
     if ($claims) {
         $roles = if ($claims.PSObject.Properties['roles'] -and $claims.roles) { ($claims.roles -join ', ') } else { '(none)' }
@@ -330,22 +346,25 @@ try {
     $usageCsv  = Invoke-PnPGraphMethod -Url $usageUrl -Method Get -Raw
     $usageRows = $usageCsv | ConvertFrom-Csv
     foreach ($row in $usageRows) {
-        $siteUrl  = ($row.'Site URL' -replace '/$','')
+        $siteUrl = (Get-CsvValue $row 'Site URL') -replace '/$',''
+        if (-not $siteUrl) { continue }
         $included = (-not $SiteUrls -or $SiteUrls.Count -eq 0) -or ($SiteUrls | Where-Object { $_.TrimEnd('/') -eq $siteUrl })
         if (-not $included) { continue }
+        $ownerName = Get-CsvValue $row 'Owner Display Name'
+        $siteTitle = if ($siteUrl) { $siteUrl.TrimEnd('/').Split('/')[-1] } else { $ownerName }
         Add-ResultRows -Rows @([PSCustomObject]@{
             ExportDate      = $runExportDate
             ReportingPeriod = $periodLabel
             Source          = 'GRAPH_USAGE'
-            SiteTitle       = $row.'Site Name'
+            SiteTitle       = $siteTitle
             SiteUrl         = $siteUrl
             InsightType     = 'SiteUsageSummary'
-            Date            = $row.'Report Refresh Date'
+            Date            = (Get-CsvValue $row 'Report Refresh Date')
             QueryText       = ''
-            QueryCount      = $row.'Visited Page Count'
+            QueryCount      = (Get-CsvValue $row 'Visited Page Count')
             AbandonedCount  = ''
             NoResultsCount  = ''
-            ClickCount      = $row.'Page View Count'
+            ClickCount      = (Get-CsvValue $row 'Page View Count')
         })
     }
     Write-OK "Site usage report: $totalRows row(s) collected."
