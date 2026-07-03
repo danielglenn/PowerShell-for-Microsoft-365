@@ -265,6 +265,10 @@ $runExportDate   = Get-Date -Format 'yyyy-MM-dd HH:mm'
 $totalRows       = 0
 $insightCounts   = @{}
 $siteCounts      = @{}
+$tokenHasReportsReadAll = $false
+$usageRowsTotal = 0
+$usageRowsWithSiteUrl = 0
+$usageRowsMatchedScope = 0
 
 function Clear-RowBuffer {
     if ($rowBuffer.Count -eq 0) { return }
@@ -327,9 +331,10 @@ try {
     $claims     = Get-JwtClaims -Token $graphToken
     if ($claims) {
         $roles = if ($claims.PSObject.Properties['roles'] -and $claims.roles) { ($claims.roles -join ', ') } else { '(none)' }
+        $tokenHasReportsReadAll = $roles -match 'Reports\.Read\.All'
         Write-Step "Graph token audience: $($claims.aud)"
         Write-Step "Graph token app roles: $roles"
-        if ($roles -notmatch 'Reports\.Read\.All') {
+        if (-not $tokenHasReportsReadAll) {
             Write-Warn "The Graph token is missing the Reports.Read.All application role."
             Write-Warn "In Entra: App registration > API permissions > Microsoft Graph > Application permissions > add Reports.Read.All, then Grant admin consent."
         }
@@ -345,11 +350,14 @@ try {
     $usageUrl  = "v1.0/reports/getSharePointSiteUsageDetail(period='$usagePeriod')"
     $usageCsv  = Invoke-PnPGraphMethod -Url $usageUrl -Method Get -Raw
     $usageRows = $usageCsv | ConvertFrom-Csv
+    $usageRowsTotal = @($usageRows).Count
     foreach ($row in $usageRows) {
         $siteUrl = (Get-CsvValue $row 'Site URL') -replace '/$',''
         if (-not $siteUrl) { continue }
+        $usageRowsWithSiteUrl++
         $included = (-not $SiteUrls -or $SiteUrls.Count -eq 0) -or ($SiteUrls | Where-Object { $_.TrimEnd('/') -eq $siteUrl })
         if (-not $included) { continue }
+        $usageRowsMatchedScope++
         $ownerName = Get-CsvValue $row 'Owner Display Name'
         $siteTitle = if ($siteUrl) { $siteUrl.TrimEnd('/').Split('/')[-1] } else { $ownerName }
         Add-ResultRows -Rows @([PSCustomObject]@{
@@ -367,6 +375,7 @@ try {
             ClickCount      = (Get-CsvValue $row 'Page View Count')
         })
     }
+    Write-Step "Usage rows returned: $usageRowsTotal; rows with Site URL: $usageRowsWithSiteUrl; rows matching scope: $usageRowsMatchedScope"
     Write-OK "Site usage report: $totalRows row(s) collected."
 } catch {
     Write-Fail "Site usage report failed: $_"
@@ -378,8 +387,21 @@ if ($totalRows -eq 0) {
     Write-Warn "No data was collected.  The CSV will not be created."
     Write-Host ""
     Write-Host "  Possible reasons:" -ForegroundColor Gray
-    Write-Host "  • Your account lacks Reports.Read.All Graph permission." -ForegroundColor Gray
-    Write-Host "  • The selected period has no recorded usage activity." -ForegroundColor Gray
+    if (-not $tokenHasReportsReadAll) {
+        Write-Host "  • Your app token does not include Reports.Read.All Graph application permission." -ForegroundColor Gray
+    }
+    if ($usageRowsTotal -eq 0) {
+        Write-Host "  • The usage report returned no rows for the selected period." -ForegroundColor Gray
+    }
+    if ($usageRowsTotal -gt 0 -and $usageRowsWithSiteUrl -eq 0) {
+        Write-Host "  • Site URL values are concealed/anonymized in tenant report settings." -ForegroundColor Gray
+    }
+    if ($usageRowsWithSiteUrl -gt 0 -and $usageRowsMatchedScope -eq 0 -and $SiteUrls -and $SiteUrls.Count -gt 0) {
+        Write-Host "  • None of the returned site URLs matched -SiteUrls (check concealment setting or URL normalization)." -ForegroundColor Gray
+    }
+    if ($usageRowsMatchedScope -gt 0 -and $totalRows -eq 0) {
+        Write-Host "  • Rows were matched but filtered out (for example, de-duplication removed duplicates)." -ForegroundColor Gray
+    }
 } else {
     Clear-RowBuffer
     Write-OK "Exported $totalRows row(s) to:"
