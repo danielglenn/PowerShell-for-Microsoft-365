@@ -2,17 +2,19 @@
 #Requires -Modules @{ ModuleName = 'PnP.PowerShell'; ModuleVersion = '2.0.0' }
 <#
 .SYNOPSIS
-    Exports SharePoint Online Search Insights to CSV.
+    Exports SharePoint Online site usage insights to CSV.
 .DESCRIPTION
-    Connects to SharePoint Online and retrieves Search Insights (top queries,
-    no-result queries, abandoned queries, and query volume) for all SharePoint
-    sites or a specific set of site URLs.  Results are exported to a
+    Connects to SharePoint Online and retrieves site usage report data for all
+    SharePoint sites or a specific set of site URLs. Results are exported to a
     well-formatted CSV file.
     Requires:
         - PowerShell 7.4 or later
         - PnP.PowerShell module  (Install-Module PnP.PowerShell -Scope CurrentUser)
         - An account with SharePoint Administrator or Global Administrator role
         - Microsoft Graph permissions: Reports.Read.All, Sites.Read.All
+    Note: SharePoint Online does not expose the site-level _api/search/analytics
+    REST endpoints used by older SharePoint implementations, so this script
+    uses the Microsoft Graph site usage report.
 .PARAMETER TenantAdminUrl
     Your SharePoint Admin Centre URL.
     Example: https://contoso-admin.sharepoint.com
@@ -31,10 +33,6 @@
     Optional switch to disable row de-duplication.
     Useful for very large exports when preserving every row and minimizing
     in-memory dedupe keys is preferred.
-.PARAMETER HeartbeatIntervalSites
-    Optional heartbeat interval for site processing status messages.
-    A message is written every N sites (default: 50).
-    Set to 0 to disable heartbeat messages.
 .PARAMETER OutputFolder
     Folder where the CSV file is written.  Defaults to the current directory.
 .PARAMETER ClientId
@@ -87,9 +85,6 @@ param(
     [Parameter()]
     [switch]$NoDedupe,
     [Parameter()]
-    [ValidateRange(0, 100000)]
-    [int]$HeartbeatIntervalSites = 50,
-    [Parameter()]
     [string]$OutputFolder = (Get-Location).Path,
     [Parameter(Mandatory = $true)]
     [string]$ClientId,
@@ -126,7 +121,7 @@ function Write-Fail {
 }
 #endregion
 #region ── Module check ───────────────────────────────────────────────────────
-Write-Header "SharePoint Online Search Insights Exporter"
+Write-Header "SharePoint Online Site Usage Insights Exporter"
 if (-not (Get-Module -ListAvailable -Name 'PnP.PowerShell' | Where-Object { $_.Version -ge [Version]'2.0' })) {
     Write-Fail "PnP.PowerShell v2+ is required."
     Write-Host "  Install it with:  Install-Module PnP.PowerShell -Scope CurrentUser" -ForegroundColor Gray
@@ -179,11 +174,9 @@ $endDate   = (Get-Date).Date
 if ($selectedReportPeriod -eq 'Last28Days') {
     $startDate       = $endDate.AddDays(-28)
     $periodLabel     = "Last_28_Days"
-    $aggInterval     = "Daily"
 } else {
     $startDate       = $endDate.AddMonths(-12)
     $periodLabel     = "Last_12_Months"
-    $aggInterval     = "Monthly"
 }
 $startDateStr = $startDate.ToString("yyyy-MM-dd")
 $endDateStr   = $endDate.ToString("yyyy-MM-dd")
@@ -216,35 +209,8 @@ try {
     exit 1
 }
 #endregion
-#region ── Discover sites ─────────────────────────────────────────────────────
-Write-Header "Discovering Sites"
-if ($SiteUrls -and $SiteUrls.Count -gt 0) {
-    # Validate / normalize the supplied URLs
-    $sites = $SiteUrls | ForEach-Object {
-        [PSCustomObject]@{
-            Url   = $_.TrimEnd('/')
-            Title = $_.TrimEnd('/').Split('/')[-1]
-        }
-    }
-    Write-OK "$($sites.Count) site(s) specified."
-} else {
-    Write-Step "Retrieving all SharePoint sites (this may take a moment) …"
-    $sites = Get-PnPTenantSite -IncludeOneDriveSites:$false |
-             Where-Object {
-                 $_.Template -notlike '*SPSPERS*' -and
-                 $_.Template -notlike '*REDIRECT*'
-             } |
-             ForEach-Object {
-        [PSCustomObject]@{
-            Url   = $_.Url.TrimEnd('/')
-            Title = $_.Title
-        }
-    }
-    Write-OK "Found $($sites.Count) SharePoint site(s)."
-}
-#endregion
 #region ── Data collection ────────────────────────────────────────────────────
-Write-Header "Collecting Search Insights"
+Write-Header "Collecting Site Usage Insights"
 $columnOrder = @(
     'ExportDate','ReportingPeriod','Source','SiteTitle','SiteUrl',
     'InsightType','Date','QueryText',
@@ -256,7 +222,7 @@ if (-not (Test-Path $OutputFolder)) {
 }
 
 $timestamp       = Get-Date -Format 'yyyyMMdd_HHmmss'
-$csvFile         = Join-Path $OutputFolder "SPO_SearchInsights_${periodLabel}_${timestamp}.csv"
+$csvFile         = Join-Path $OutputFolder "SPO_SiteUsage_${periodLabel}_${timestamp}.csv"
 $bufferFlushSize = 500
 $rowBuffer       = [System.Collections.Generic.List[PSCustomObject]]::new()
 $seenRowKeys     = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -265,7 +231,7 @@ $totalRows       = 0
 $insightCounts   = @{}
 $siteCounts      = @{}
 
-function Flush-RowBuffer {
+function Clear-RowBuffer {
     if ($rowBuffer.Count -eq 0) { return }
     $append = Test-Path $csvFile
     $rowBuffer |
@@ -312,151 +278,40 @@ function Add-ResultRows {
         $siteCounts[$siteKey]++
 
         if ($rowBuffer.Count -ge $bufferFlushSize) {
-            Flush-RowBuffer
+            Clear-RowBuffer
         }
     }
 }
-# ── Helper: call SharePoint REST analytics endpoint ──────────────────────────
-function Invoke-SiteSearchAnalytics {
-    param(
-        [string]$SiteUrl,
-        [string]$AnalyticsEndpoint,   # relative, e.g. "GetTopQueries"
-        [string]$StartDate,
-        [string]$EndDate
-    )
-    $apiPath = "$SiteUrl/_api/search/analytics/$AnalyticsEndpoint" +
-               "?startdate='$StartDate'&enddate='$EndDate'&rowlimit=100"
-    try {
-        $resp = Invoke-PnPSPRestMethod -Method Get -Url $apiPath
-        return $resp
-    } catch {
-        $statusCode = $null
-        $responseBody = $null
-        if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) {
-            $statusCode = try { [int]$_.Exception.Response.StatusCode } catch { $null }
-            try {
-                $stream = $_.Exception.Response.GetResponseStream()
-                if ($stream) {
-                    $reader = [System.IO.StreamReader]::new($stream)
-                    $responseBody = $reader.ReadToEnd()
-                    $reader.Dispose()
-                }
-            } catch {
-                $responseBody = $null
-            }
-        }
-
-        Write-Warn "REST analytics call failed for $SiteUrl [$AnalyticsEndpoint]. Status: $statusCode. Error: $($_.Exception.Message)"
-        if ($responseBody) {
-            Write-Warn "Response body: $responseBody"
-        }
-
-        return $null
-    }
-}
-# ── Helper: parse SharePoint REST analytics response ─────────────────────────
-function ConvertFrom-SPOAnalyticsResponse {
-    param(
-        [object]$Response,
-        [string]$SiteTitle,
-        [string]$SiteUrl,
-        [string]$InsightType,
-        [string]$PeriodLabel
-    )
-    if (-not $Response) { return }
-    $items = $null
-    if ($Response.PSObject.Properties['value'])   { $items = $Response.value }
-    elseif ($Response -is [array])                { $items = $Response }
-    if (-not $items) { return }
-    foreach ($item in $items) {
-        [PSCustomObject]@{
+# Retrieve the tenant-wide SharePoint site usage report (page views and site
+# activity per site) and filter to the requested site scope.
+$usagePeriod = if ($selectedReportPeriod -eq 'Last28Days') { 'D30' } else { 'D180' }
+Write-Step "Retrieving SharePoint Site Usage report (period '$usagePeriod') …"
+try {
+    $usageUrl  = "v1.0/reports/getSharePointSiteUsageDetail(period='$usagePeriod')"
+    $usageCsv  = Invoke-PnPGraphMethod -Url $usageUrl -Method Get -Raw
+    $usageRows = $usageCsv | ConvertFrom-Csv
+    foreach ($row in $usageRows) {
+        $siteUrl  = ($row.'Site URL' -replace '/$','')
+        $included = (-not $SiteUrls -or $SiteUrls.Count -eq 0) -or ($SiteUrls | Where-Object { $_.TrimEnd('/') -eq $siteUrl })
+        if (-not $included) { continue }
+        Add-ResultRows -Rows @([PSCustomObject]@{
             ExportDate      = $runExportDate
-            ReportingPeriod = $PeriodLabel
-            Source          = 'SPO_REST'
-            SiteTitle       = $SiteTitle
-            SiteUrl         = $SiteUrl
-            InsightType     = $InsightType
-            Date            = if ($item.PSObject.Properties['Date'])         { $item.Date }         else { '' }
-            QueryText       = if ($item.PSObject.Properties['Query'])        { $item.Query }
-                              elseif ($item.PSObject.Properties['QueryText']){ $item.QueryText }    else { '' }
-            QueryCount      = if ($item.PSObject.Properties['Count'])        { $item.Count }
-                              elseif ($item.PSObject.Properties['Hits'])     { $item.Hits }         else { '' }
-            AbandonedCount  = if ($item.PSObject.Properties['Abandoned'])    { $item.Abandoned }    else { '' }
-            NoResultsCount  = if ($item.PSObject.Properties['NoResults'])    { $item.NoResults }    else { '' }
-            ClickCount      = if ($item.PSObject.Properties['Clicks'])       { $item.Clicks }       else { '' }
-        }
+            ReportingPeriod = $periodLabel
+            Source          = 'GRAPH_USAGE'
+            SiteTitle       = $row.'Site Name'
+            SiteUrl         = $siteUrl
+            InsightType     = 'SiteUsageSummary'
+            Date            = $row.'Report Refresh Date'
+            QueryText       = ''
+            QueryCount      = $row.'Visited Page Count'
+            AbandonedCount  = ''
+            NoResultsCount  = ''
+            ClickCount      = $row.'Page View Count'
+        })
     }
-}
-# ── Per-site SharePoint REST analytics (supplemental) ─────────────────────────
-$siteIndex = 0
-foreach ($site in $sites) {
-    $siteIndex++
-    $pct = [int](($siteIndex / $sites.Count) * 100)
-    Write-Progress -Activity "Querying site analytics" `
-                   -Status "$siteIndex of $($sites.Count): $($site.Title)" `
-                   -PercentComplete $pct
-    $spoInsights = @(
-        @{ Type = 'TopQueries';       Endpoint = 'GetTopQueries' }
-        @{ Type = 'NoResultQueries';  Endpoint = 'GetNoResultQueries' }
-        @{ Type = 'AbandonedQueries'; Endpoint = 'GetAbandonedQueries' }
-    )
-    foreach ($insight in $spoInsights) {
-        $resp = Invoke-SiteSearchAnalytics `
-                    -SiteUrl       $site.Url `
-                    -AnalyticsEndpoint $insight.Endpoint `
-                    -StartDate     $startDateStr `
-                    -EndDate       $endDateStr
-        $parsed = ConvertFrom-SPOAnalyticsResponse `
-                    -Response    $resp `
-                    -SiteTitle   $site.Title `
-                    -SiteUrl     $site.Url `
-                    -InsightType $insight.Type `
-                    -PeriodLabel $periodLabel
-        if ($parsed) {
-            Add-ResultRows -Rows $parsed
-        }
-    }
-    if ($HeartbeatIntervalSites -gt 0 -and
-        (($siteIndex % $HeartbeatIntervalSites) -eq 0 -or $siteIndex -eq $sites.Count)) {
-        Write-Step "Heartbeat: processed $siteIndex/$($sites.Count) sites ($pct%). Rows written so far: $totalRows"
-    }
-}
-Write-Progress -Activity "Querying site analytics" -Completed
-#endregion
-#region ── Fallback: Graph site usage report ──────────────────────────────────
-# If no search-specific rows were collected, fall back to the GA usage report
-# which at minimum shows page views and site activity per site.
-if ($totalRows -eq 0) {
-    Write-Warn "No search-insight data returned from Graph or REST APIs."
-    Write-Step "Falling back to SharePoint Site Usage report (D30 / D180) …"
-    $usagePeriod = if ($selectedReportPeriod -eq 'Last28Days') { 'D30' } else { 'D180' }
-    try {
-        $usageUrl  = "v1.0/reports/getSharePointSiteUsageDetail(period='$usagePeriod')"
-        $usageCsv  = Invoke-PnPGraphMethod -Url $usageUrl -Method Get -Raw
-        $usageRows = $usageCsv | ConvertFrom-Csv
-        foreach ($row in $usageRows) {
-            $siteUrl  = ($row.'Site URL' -replace '/$','')
-            $included = (-not $SiteUrls -or $SiteUrls.Count -eq 0) -or ($SiteUrls | Where-Object { $_.TrimEnd('/') -eq $siteUrl })
-            if (-not $included) { continue }
-            Add-ResultRows -Rows @([PSCustomObject]@{
-                ExportDate      = $runExportDate
-                ReportingPeriod = $periodLabel
-                Source          = 'GRAPH_USAGE'
-                SiteTitle       = $row.'Site Name'
-                SiteUrl         = $siteUrl
-                InsightType     = 'SiteUsageSummary'
-                Date            = $row.'Report Refresh Date'
-                QueryText       = ''
-                QueryCount      = $row.'Visited Page Count'
-                AbandonedCount  = ''
-                NoResultsCount  = ''
-                ClickCount      = $row.'Page View Count'
-            })
-        }
-        Write-OK "Site usage report: $totalRows row(s) collected."
-    } catch {
-        Write-Fail "Site usage report also failed: $_"
-    }
+    Write-OK "Site usage report: $totalRows row(s) collected."
+} catch {
+    Write-Fail "Site usage report failed: $_"
 }
 #endregion
 #region ── Export ─────────────────────────────────────────────────────────────
@@ -466,10 +321,9 @@ if ($totalRows -eq 0) {
     Write-Host ""
     Write-Host "  Possible reasons:" -ForegroundColor Gray
     Write-Host "  • Your account lacks Reports.Read.All Graph permission." -ForegroundColor Gray
-    Write-Host "  • Search Insights haven't been enabled on these sites." -ForegroundColor Gray
-    Write-Host "  • The selected period has no recorded search activity." -ForegroundColor Gray
+    Write-Host "  • The selected period has no recorded usage activity." -ForegroundColor Gray
 } else {
-    Flush-RowBuffer
+    Clear-RowBuffer
     Write-OK "Exported $totalRows row(s) to:"
     Write-Host "  $csvFile" -ForegroundColor White
     # Quick summary table
@@ -506,15 +360,15 @@ Write-Host ""
   ─────────────────────────────────────────────────────────────
   ExportDate       Date/time the script was run
   ReportingPeriod  "Last_28_Days" or "Last_12_Months"
-    Source           Data source (GRAPH, SPO_REST, GRAPH_USAGE)
+  Source           Data source (GRAPH_USAGE)
   SiteTitle        Display name of the site
   SiteUrl          Absolute URL of the site
-  InsightType      TopQueries | NoResultQueries | AbandonedQueries | SiteUsageSummary
-  Date             Date the metric relates to (daily / monthly / summary)
-  QueryText        The search query string (blank for summary rows)
-  QueryCount       Number of times the query was executed (or visited page count for summary)
-  AbandonedCount   Queries started but not completed
-  NoResultsCount   Queries that returned zero results
-  ClickCount       Number of result clicks (or page view count for summary)
+  InsightType      SiteUsageSummary
+  Date             Date the metric relates to (report refresh date)
+  QueryText        Blank for summary rows
+  QueryCount       Visited page count
+  AbandonedCount   Blank for summary rows
+  NoResultsCount   Blank for summary rows
+  ClickCount       Page view count
 #>
 #endregion
