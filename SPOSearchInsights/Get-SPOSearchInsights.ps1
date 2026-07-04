@@ -278,9 +278,11 @@ $tokenHasReportsReadAll = $false
 $usageRowsTotal = 0
 $usageRowsWithSiteUrl = 0
 $usageRowsWithSiteIdentifier = 0
+$usageRowsUsingFallbackIdentifier = 0
 $usageRowsMatchedScope = 0
 $ignoreSiteUrlFilterDueToConcealment = $false
 $siteUrlFilterWasAutoDisabled = $false
+$concealmentStillEffectiveWarned = $false
 
 function Clear-RowBuffer {
     if ($rowBuffer.Count -eq 0) { return }
@@ -379,6 +381,15 @@ try {
         if (-not $siteIdentifier) { continue }
         $usageRowsWithSiteIdentifier++
 
+        if (-not $siteUrl) {
+            $usageRowsUsingFallbackIdentifier++
+            if (-not $concealmentStillEffectiveWarned) {
+                Write-Warn "Site URL is blank in the report. Concealed names setting still appears effective (or report cache is not refreshed yet)."
+                Write-Warn "Export will keep fallback site identifiers (for example GUIDs) in the SiteUrl column until real URLs appear."
+                $concealmentStillEffectiveWarned = $true
+            }
+        }
+
         if (-not $siteUrl -and $SiteUrls -and $SiteUrls.Count -gt 0 -and -not $ignoreSiteUrlFilterDueToConcealment) {
             $ignoreSiteUrlFilterDueToConcealment = $true
             $siteUrlFilterWasAutoDisabled = $true
@@ -414,7 +425,7 @@ try {
             ClickCount      = (Get-CsvValue $row 'Page View Count')
         })
     }
-    Write-Step "Usage rows returned: $usageRowsTotal; rows with Site URL: $usageRowsWithSiteUrl; rows with site identifier: $usageRowsWithSiteIdentifier; rows matching scope: $usageRowsMatchedScope"
+    Write-Step "Usage rows returned: $usageRowsTotal; rows with Site URL: $usageRowsWithSiteUrl; rows using fallback identifier: $usageRowsUsingFallbackIdentifier; rows with site identifier: $usageRowsWithSiteIdentifier; rows matching scope: $usageRowsMatchedScope"
     Write-OK "Site usage report: $totalRows row(s) collected."
 } catch {
     Write-Fail "Site usage report failed: $_"
@@ -479,7 +490,8 @@ Write-Host "  Done." -ForegroundColor Cyan
 Write-Host ("=" * 60) -ForegroundColor Cyan
 Write-Host ""
 if ($siteUrlFilterWasAutoDisabled) {
-    Write-Warn "-SiteUrls was ignored because tenant report concealment is enabled. Disable concealment to filter by real URLs."
+    Write-Warn "-SiteUrls was ignored because Site URL values are still blank in the report."
+    Write-Warn "This usually means concealed names are still effective or report cache has not refreshed yet."
     Write-Host ""
 }
 #endregion
